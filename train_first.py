@@ -203,8 +203,15 @@ def main(config_path):
                 mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
                 s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
 
-            # encode
-            t_en = model.text_encoder(texts, input_lengths, text_mask)
+            # encode with phoneme projection + PPIM
+            e_ph = model.text_encoder.embedding(texts)
+            e_proj = model.phoneme_proj(e_ph)
+            t_en = model.text_encoder.forward_from_embeddings(e_proj, input_lengths, text_mask)
+
+            bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
+            d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
+
+            t_en, d_en = model.ppim(t_en, d_en, text_mask)
 
             # 50% of chance of using monotonic version
             if bool(random.getrandbits(1)):
@@ -297,7 +304,11 @@ def main(config_path):
 
             accelerator.backward(g_loss)
             
+            optimizer.step('phoneme_proj')
             optimizer.step('text_encoder')
+            optimizer.step('ppim')
+            optimizer.step('bert_encoder')
+            optimizer.step('bert')
             optimizer.step('style_encoder')
             optimizer.step('decoder')
             
@@ -349,9 +360,16 @@ def main(config_path):
                     attn_mask = (attn_mask < 1)
                     s2s_attn.masked_fill_(attn_mask, 0.0)
 
-                # encode
-                t_en = model.text_encoder(texts, input_lengths, text_mask)
-                
+                # encode with phoneme projection + PPIM
+                e_ph = model.text_encoder.embedding(texts)
+                e_proj = model.phoneme_proj(e_ph)
+                t_en = model.text_encoder.forward_from_embeddings(e_proj, input_lengths, text_mask)
+
+                bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
+                d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
+
+                t_en, d_en = model.ppim(t_en, d_en, text_mask)
+
                 asr = (t_en @ s2s_attn)
 
                 # get clips

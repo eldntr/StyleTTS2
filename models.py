@@ -280,7 +280,51 @@ class LayerNorm(nn.Module):
         x = x.transpose(1, -1)
         x = F.layer_norm(x, (self.channels,), self.gamma, self.beta, self.eps)
         return x.transpose(1, -1)
-    
+
+
+class LearnablePhonemeEmbeddingProjection(nn.Module):
+    def __init__(self, d_ph=256):
+        super().__init__()
+        self.proj = nn.Linear(d_ph, d_ph)
+        nn.init.eye_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
+
+    def forward(self, e_ph):
+        return self.proj(e_ph)
+
+
+class ProsodyPhonemeInteractionModule(nn.Module):
+    def __init__(self, hidden_dim=256, negative_slope=0.2):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LeakyReLU(negative_slope),
+            nn.Linear(hidden_dim, hidden_dim * 2),
+        )
+        self.proj_acoustic = nn.Linear(hidden_dim, hidden_dim)
+        self.proj_prosodic = nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, h_text, h_prosody, mask=None):
+        # h_text, h_prosody: [B, C, T]
+        z = torch.cat([h_text, h_prosody], dim=1).transpose(1, 2)  # [B, T, 2C]
+        dz = self.mlp(z)
+        dz_a, dz_p = torch.chunk(dz, 2, dim=-1)
+
+        delta_a = self.proj_acoustic(dz_a).transpose(1, 2)
+        delta_p = self.proj_prosodic(dz_p).transpose(1, 2)
+
+        h_text_tilde = h_text + delta_a
+        h_prosody_tilde = h_prosody + delta_p
+
+        if mask is not None:
+            mask = mask.unsqueeze(1).to(h_text_tilde.device)
+            h_text_tilde = h_text_tilde.masked_fill(mask, 0.0)
+            h_prosody_tilde = h_prosody_tilde.masked_fill(mask, 0.0)
+
+        return h_text_tilde, h_prosody_tilde
+
+
 class TextEncoder(nn.Module):
     def __init__(self, channels, kernel_size, depth, n_symbols, actv=nn.LeakyReLU(0.2)):
         super().__init__()
@@ -295,55 +339,53 @@ class TextEncoder(nn.Module):
                 actv,
                 nn.Dropout(0.2),
             ))
-        # self.cnn = nn.Sequential(*self.cnn)
 
         self.lstm = nn.LSTM(channels, channels//2, 1, batch_first=True, bidirectional=True)
 
-    def forward(self, x, input_lengths, m):
-        x = self.embedding(x)  # [B, T, emb]
-        x = x.transpose(1, 2)  # [B, emb, T]
+    def forward_from_embeddings(self, x, input_lengths, m):
+        # x: [B, T, C]
+        x = x.transpose(1, 2)  # [B, C, T]
         m = m.to(input_lengths.device).unsqueeze(1)
         x.masked_fill_(m, 0.0)
-        
+
         for c in self.cnn:
             x = c(x)
             x.masked_fill_(m, 0.0)
-            
-        x = x.transpose(1, 2)  # [B, T, chn]
 
+        x = x.transpose(1, 2)  # [B, T, C]
         input_lengths = input_lengths.cpu().numpy()
         x = nn.utils.rnn.pack_padded_sequence(
             x, input_lengths, batch_first=True, enforce_sorted=False)
 
         self.lstm.flatten_parameters()
         x, _ = self.lstm(x)
-        x, _ = nn.utils.rnn.pad_packed_sequence(
-            x, batch_first=True)
-                
-        x = x.transpose(-1, -2)
-        x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]])
+        x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
 
+        x = x.transpose(-1, -2)
+        x_pad = torch.zeros([x.shape[0], x.shape[1], m.shape[-1]], device=x.device, dtype=x.dtype)
         x_pad[:, :, :x.shape[-1]] = x
-        x = x_pad.to(x.device)
-        
+        x = x_pad
         x.masked_fill_(m, 0.0)
-        
         return x
+
+    def forward(self, x, input_lengths, m):
+        x = self.embedding(x)  # [B, T, C]
+        return self.forward_from_embeddings(x, input_lengths, m)
 
     def inference(self, x):
         x = self.embedding(x)
         x = x.transpose(1, 2)
-        x = self.cnn(x)
+        for c in self.cnn:
+            x = c(x)
         x = x.transpose(1, 2)
         self.lstm.flatten_parameters()
         x, _ = self.lstm(x)
         return x
-    
+
     def length_to_mask(self, lengths):
         mask = torch.arange(lengths.max()).unsqueeze(0).expand(lengths.shape[0], -1).type_as(lengths)
         mask = torch.gt(mask+1, lengths.unsqueeze(1))
         return mask
-
 
 
 class AdaIN1d(nn.Module):
@@ -632,8 +674,10 @@ def build_model(args, text_aligner, pitch_extractor, bert):
                 resblock_dilation_sizes=args.decoder.resblock_dilation_sizes,
                 upsample_kernel_sizes=args.decoder.upsample_kernel_sizes) 
         
+    phoneme_proj = LearnablePhonemeEmbeddingProjection(d_ph=args.hidden_dim)
     text_encoder = TextEncoder(channels=args.hidden_dim, kernel_size=5, depth=args.n_layer, n_symbols=args.n_token)
-    
+    ppim = ProsodyPhonemeInteractionModule(hidden_dim=args.hidden_dim)
+
     predictor = ProsodyPredictor(style_dim=args.style_dim, d_hid=args.hidden_dim, nlayers=args.n_layer, max_dur=args.max_dur, dropout=args.dropout)
     
     style_encoder = StyleEncoder(dim_in=args.dim_in, style_dim=args.style_dim, max_conv_dim=args.hidden_dim) # acoustic style encoder
@@ -675,7 +719,9 @@ def build_model(args, text_aligner, pitch_extractor, bert):
 
             predictor=predictor,
             decoder=decoder,
+            phoneme_proj=phoneme_proj,
             text_encoder=text_encoder,
+            ppim=ppim,
 
             predictor_encoder=predictor_encoder,
             style_encoder=style_encoder,

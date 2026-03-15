@@ -48,6 +48,19 @@ handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
 
+def encode_with_pp_modules(model, texts, input_lengths, text_mask):
+    e_ph = model.text_encoder.embedding(texts)
+    e_proj = model.phoneme_proj(e_ph)
+    t_en = model.text_encoder.forward_from_embeddings(e_proj, input_lengths, text_mask)
+
+    bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
+    d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
+
+    t_en, d_en = model.ppim(t_en, d_en, text_mask)
+    return e_proj, t_en, d_en
+
+
+
 @click.command()
 @click.option('-p', '--config_path', default='Configs/config.yml', type=str)
 def main(config_path):
@@ -250,6 +263,8 @@ def main(config_path):
         model.predictor.train()
         model.bert_encoder.train()
         model.bert.train()
+        model.phoneme_proj.train()
+        model.ppim.train()
         model.msd.train()
         model.mpd.train()
 
@@ -277,12 +292,6 @@ def main(config_path):
 
                 mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
                 s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
-
-                # encode
-                t_en = model.text_encoder(texts, input_lengths, text_mask)
-                asr = (t_en @ s2s_attn_mono)
-
-                d_gt = s2s_attn_mono.sum(axis=-1).detach()
                 
                 # compute reference styles
                 if multispeaker and epoch >= diff_epoch:
@@ -306,8 +315,20 @@ def main(config_path):
             gs = torch.stack(gs).squeeze() # global acoustic styles
             s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
 
+            # encode with phoneme projection + PPIM
+            e_ph = model.text_encoder.embedding(texts)
+            e_proj = model.phoneme_proj(e_ph)
+            t_en = model.text_encoder.forward_from_embeddings(e_proj, input_lengths, text_mask)
+
             bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-            d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
+            d_en_raw = model.bert_encoder(bert_dur).transpose(-1, -2)
+
+            # keep BERT embedding for diffusion, but use PPIM-interacted prosodic states for predictor
+            t_en, d_en = model.ppim(t_en.detach() if not model.text_encoder.training else t_en, d_en_raw, text_mask)
+
+            asr = (t_en @ s2s_attn_mono)
+            d_gt = s2s_attn_mono.sum(axis=-1).detach()
+
             
             # denoiser training
             if epoch >= diff_epoch:
@@ -456,6 +477,8 @@ def main(config_path):
                 from IPython.core.debugger import set_trace
                 set_trace()
 
+            optimizer.step('phoneme_proj')
+            optimizer.step('ppim')
             optimizer.step('bert_encoder')
             optimizer.step('bert')
             optimizer.step('predictor')
@@ -524,6 +547,8 @@ def main(config_path):
                     if p.grad is not None:
                         p.grad *= slmadv_params.scale
 
+                optimizer.step('phoneme_proj')
+                optimizer.step('ppim')
                 optimizer.step('bert_encoder')
                 optimizer.step('bert')
                 optimizer.step('predictor')
@@ -587,8 +612,8 @@ def main(config_path):
                         mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
                         s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
 
-                        # encode
-                        t_en = model.text_encoder(texts, input_lengths, text_mask)
+                        # encode with phoneme projection + PPIM
+                        _, t_en, d_en_ppim = encode_with_pp_modules(model, texts, input_lengths, text_mask)
                         asr = (t_en @ s2s_attn_mono)
 
                         d_gt = s2s_attn_mono.sum(axis=-1).detach()
@@ -609,7 +634,8 @@ def main(config_path):
                     s_trg = torch.cat([s, gs], dim=-1).detach()
 
                     bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-                    d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
+                    d_en_raw = model.bert_encoder(bert_dur).transpose(-1, -2)
+                    _, d_en = model.ppim(t_en, d_en_raw, text_mask)
                     d, p = model.predictor(d_en, s, 
                                                         input_lengths, 
                                                         s2s_attn_mono, 
