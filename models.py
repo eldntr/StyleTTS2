@@ -698,16 +698,29 @@ def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_module
     params = state['net']
     for key in model:
         if key in params and key not in ignore_modules:
+            # Filter out shape mismatches
+            state_dict = params[key]
+            model_state = model[key].state_dict()
+            valid_state_dict = {}
+            for k, v in state_dict.items():
+                if k in model_state and v.shape == model_state[k].shape:
+                    valid_state_dict[k] = v
+                else:
+                    print(f"Skipping parameter {key}.{k} due to shape mismatch: {v.shape} vs {model_state.get(k, torch.empty(0)).shape}")
             print('%s loaded' % key)
-            model[key].load_state_dict(params[key], strict=False)
+            model[key].load_state_dict(valid_state_dict, strict=False)
     _ = [model[key].eval() for key in model]
     
     if not load_only_params:
-        epoch = state["epoch"]
-        iters = state["iters"]
-        optimizer.load_state_dict(state["optimizer"])
+        epoch = state.get("epoch", 0)
+        iters = state.get("iters", 0)
+        if "optimizer" in state:
+            try:
+                optimizer.load_state_dict(state["optimizer"])
+            except Exception as e:
+                print(f"Warning: Failed to load optimizer state: {e}")
     else:
         epoch = 0
         iters = 0
         
-    return model, optimizer, epoch, iters
+    return model, optimizer, epoch, iters, state

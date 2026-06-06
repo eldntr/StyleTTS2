@@ -86,6 +86,17 @@ def main(config_path):
     diff_epoch = loss_params.diff_epoch
     joint_epoch = loss_params.joint_epoch
     
+    early_stopping_params = Munch(config.get('early_stopping_params', {
+        'patience_diff': 5,
+        'patience_joint': 5,
+        'patience_stage2': 10
+    }))
+    from utils import EarlyStopping
+    es_diff = EarlyStopping(patience=early_stopping_params.get('patience_diff', 5))
+    es_joint = EarlyStopping(patience=early_stopping_params.get('patience_joint', 5))
+    es_stage2 = EarlyStopping(patience=early_stopping_params.get('patience_stage2', 10))
+
+    
     optimizer_params = Munch(config['optimizer_params'])
     
     train_list, val_list = get_data_path_list(train_path, val_path)
@@ -143,7 +154,7 @@ def main(config_path):
         if config.get('first_stage_path', '') != '':
             first_stage_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
             print('Loading the first stage model at %s ...' % first_stage_path)
-            model, _, start_epoch, iters = load_checkpoint(model, 
+            model, _, start_epoch, iters, state = load_checkpoint(model, 
                 None, 
                 first_stage_path,
                 load_only_params=True,
@@ -208,9 +219,11 @@ def main(config_path):
             g['weight_decay'] = 1e-4
         
     # load models if there is a model
+    state = None
     if load_pretrained:
-        model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
-                                    load_only_params=config.get('load_only_params', True))
+        model, optimizer, start_epoch, iters, state = load_checkpoint(model,  optimizer, config['pretrained_model'],
+                                    load_only_params=config.get('load_only_params', True),
+                                    ignore_modules=config.get('pretrained_ignore_modules', []))
         
     n_down = model.text_aligner.n_down
 
@@ -230,6 +243,17 @@ def main(config_path):
     start_ds = False
     
     running_std = []
+    
+    diff_active = False
+    joint_active = False
+    
+    if state is not None and not config.get('load_only_params', True):
+        diff_active = state.get('diff_active', start_epoch >= diff_epoch)
+        joint_active = state.get('joint_active', start_epoch >= joint_epoch)
+    else:
+        diff_active = start_epoch >= diff_epoch
+        joint_active = start_epoch >= joint_epoch
+
     
     slmadv_params = Munch(config['slmadv_params'])
     slmadv = SLMAdversarialLoss(model, wl, sampler, 
@@ -254,7 +278,7 @@ def main(config_path):
         model.mpd.train()
 
 
-        if epoch >= diff_epoch:
+        if diff_active:
             start_ds = True
 
         for i, batch in enumerate(train_dataloader):
@@ -285,7 +309,7 @@ def main(config_path):
                 d_gt = s2s_attn_mono.sum(axis=-1).detach()
                 
                 # compute reference styles
-                if multispeaker and epoch >= diff_epoch:
+                if multispeaker and diff_active:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
                     ref = torch.cat([ref_ss, ref_sp], dim=1)
@@ -310,7 +334,7 @@ def main(config_path):
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
             
             # denoiser training
-            if epoch >= diff_epoch:
+            if diff_active:
                 num_steps = np.random.randint(3, 5)
                 
                 if model_params.diffusion.dist.estimate_sigma_data:
@@ -390,7 +414,7 @@ def main(config_path):
                 y_rec_gt = wav.unsqueeze(1)
                 y_rec_gt_pred = model.decoder(en, F0_real, N_real, s)
 
-                if epoch >= joint_epoch:
+                if joint_active:
                     # ground truth from recording
                     wav = y_rec_gt # use recording since decoder is tuned
                 else:
@@ -453,18 +477,19 @@ def main(config_path):
             running_loss += loss_mel.item()
             g_loss.backward()
             if torch.isnan(g_loss):
-                from IPython.core.debugger import set_trace
-                set_trace()
+                print(f"[Peringatan] Terdeteksi NaN pada Epoch {epoch+1}, Step {i+1}. Melompati batch ini...")
+                optimizer.zero_grad()
+                continue
 
             optimizer.step('bert_encoder')
             optimizer.step('bert')
             optimizer.step('predictor')
             optimizer.step('predictor_encoder')
             
-            if epoch >= diff_epoch:
+            if diff_active:
                 optimizer.step('diffusion')
             
-            if epoch >= joint_epoch:
+            if joint_active:
                 optimizer.step('style_encoder')
                 optimizer.step('decoder')
         
@@ -651,8 +676,9 @@ def main(config_path):
                         for bib in range(_s2s_trg.shape[0]):
                             _s2s_trg[bib, :_text_input[bib]] = 1
                         _dur_pred = torch.sigmoid(_s2s_pred).sum(axis=1)
-                        loss_dur += F.l1_loss(_dur_pred[1:_text_length-1], 
-                                               _text_input[1:_text_length-1])
+                        if _text_length > 2:
+                            loss_dur += F.l1_loss(_dur_pred[1:_text_length-1], 
+                                                   _text_input[1:_text_length-1])
 
                     loss_dur /= texts.size(0)
 
@@ -682,7 +708,7 @@ def main(config_path):
         writer.add_scalar('eval/dur_loss', loss_align / iters_test, epoch + 1)
         writer.add_scalar('eval/F0_loss', loss_f / iters_test, epoch + 1)
         
-        if epoch < joint_epoch:
+        if not joint_active:
             # generating reconstruction examples with GT duration
             
             with torch.no_grad():
@@ -718,7 +744,7 @@ def main(config_path):
             # generating sampled speech from text directly
             with torch.no_grad():
                 # compute reference styles
-                if multispeaker and epoch >= diff_epoch:
+                if multispeaker and diff_active:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
                     ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
                     ref_s = torch.cat([ref_ss, ref_sp], dim=1)
@@ -777,6 +803,8 @@ def main(config_path):
                 'iters': iters,
                 'val_loss': loss_test / iters_test,
                 'epoch': epoch,
+                'diff_active': diff_active,
+                'joint_active': joint_active,
             }
             save_path = osp.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
             torch.save(state, save_path)
@@ -787,6 +815,25 @@ def main(config_path):
                 
                 with open(osp.join(log_dir, osp.basename(config_path)), 'w') as outfile:
                     yaml.dump(config, outfile, default_flow_style=True)
+                    
+        val_mel_loss = loss_test / iters_test
+        val_dur_loss = loss_align / iters_test
+
+        if not diff_active:
+            if es_diff.step(val_dur_loss):
+                diff_active = True
+                print("Early stopping triggered: transitioning to Diffusion training phase.")
+                es_joint.reset()
+        elif not joint_active:
+            if es_joint.step(val_mel_loss):
+                joint_active = True
+                print("Early stopping triggered: transitioning to Joint training phase.")
+                es_stage2.reset()
+        else:
+            if es_stage2.step(val_mel_loss):
+                print("Early stopping triggered: Stage 2 training completed.")
+                break
+
         
 if __name__=="__main__":
     main()

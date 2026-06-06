@@ -5,22 +5,23 @@ log_interval: 10
 device: "cuda"
 epochs_1st: 200 # number of epochs for first stage training (pre-training)
 epochs_2nd: 100 # number of peochs for second stage training (joint training)
-batch_size: 16
-max_len: 400 # maximum number of frames
-pretrained_model: ""
-second_stage_load_pretrained: true # set to true if the pre-trained model is for 2nd stage
-load_only_params: false # set to true if do not want to load epoch numbers and optimizer parameters
+batch_size: 2
+max_len: 200 # maximum number of frames
+pretrained_model: "/workspace/local/epoch_2nd_00100.pth"
+second_stage_load_pretrained: false # set to true if the pre-trained model is for 2nd stage
+load_only_params: true # set to true if do not want to load epoch numbers and optimizer parameters
+pretrained_ignore_modules: ['bert', 'text_aligner', 'pitch_extractor'] # Ignore custom modules when loading English pretrained weights
 
 F0_path: "Utils/JDC/bst.t7"
 ASR_config: "Utils/ASR/config.yml"
-ASR_path: "Utils/ASR/epoch_00080.pth"
-PLBERT_dir: 'Utils/PLBERT/'
+ASR_path: "Utils/ASR/epoch_00200.pth"
+PLBERT_dir: "Utils/PLBERT/"
 
 data_params:
-  train_data: "Data/train_list.txt"
-  val_data: "Data/val_list.txt"
-  root_path: "/local/LJSpeech-1.1/wavs"
-  OOD_data: "Data/OOD_texts.txt"
+  train_data: "../local/id/phonemized_lists/train_list_phon_sub.txt"
+  val_data: "../local/id/phonemized_lists/val_list_phon_sub.txt"
+  root_path: "../local/id/wavs"
+  OOD_data: "../local/id/phonemized_lists/test_list_phon_sub.txt"
   min_length: 50 # sample until texts with this size are obtained for OOD texts
 
 preprocess_params:
@@ -31,7 +32,7 @@ preprocess_params:
     hop_length: 300
 
 model_params:
-  multispeaker: false
+  multispeaker: true
 
   dim_in: 64 
   hidden_dim: 512
@@ -39,7 +40,7 @@ model_params:
   n_layer: 3
   n_mels: 80
 
-  n_token: 178 # number of phoneme tokens
+  n_token: 181 # number of phoneme tokens
   max_dur: 50 # maximum duration of a single phoneme
   style_dim: 128 # style vector size
   
@@ -113,4 +114,12 @@ slmadv_params:
   thresh: 5 # gradient norm above which the gradient is scaled
   scale: 0.01 # gradient scaling factor for predictors from SLM discriminators
   sig: 1.5 # sigma for differentiable duration modeling
+  
+early_stopping_params:
+  patience_tma: 5
+  patience_stage1: 10
+  patience_diff: 5
+  patience_joint: 5
+  patience_stage2: 10
+
   
