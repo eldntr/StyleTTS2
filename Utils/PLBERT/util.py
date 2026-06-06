@@ -5,38 +5,34 @@ from transformers import AlbertConfig, AlbertModel
 
 class CustomAlbert(AlbertModel):
     def forward(self, *args, **kwargs):
-        # Call the original forward method
         outputs = super().forward(*args, **kwargs)
-
-        # Only return the last_hidden_state
         return outputs.last_hidden_state
 
 
 def load_plbert(log_dir):
     config_path = os.path.join(log_dir, "config.yml")
-    plbert_config = yaml.safe_load(open(config_path))
-    
+    with open(config_path, "r", encoding="utf-8") as f:
+        plbert_config = yaml.safe_load(f)
+
     albert_base_configuration = AlbertConfig(**plbert_config['model_params'])
     bert = CustomAlbert(albert_base_configuration)
 
-    files = os.listdir(log_dir)
-    ckpts = []
-    for f in os.listdir(log_dir):
-        if f.startswith("step_"): ckpts.append(f)
+    checkpoint_path = os.path.join(log_dir, "step_1000000.t7")
+    if not os.path.isfile(checkpoint_path):
+        raise FileNotFoundError(f"PLBERT checkpoint not found: {checkpoint_path}")
 
-    iters = [int(f.split('_')[-1].split('.')[0]) for f in ckpts if os.path.isfile(os.path.join(log_dir, f))]
-    iters = sorted(iters)[-1]
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+    state_dict = checkpoint['model_state']
 
-    checkpoint = torch.load(log_dir + "/step_" + str(iters) + ".t7", map_location='cpu')
-    state_dict = checkpoint['net']
-    from collections import OrderedDict
-    new_state_dict = OrderedDict()
-    for k, v in state_dict.items():
-        name = k[7:] # remove `module.`
+    new_state_dict = {}
+    for name, value in state_dict.items():
+        if name.startswith('module.'):
+            name = name[7:]
         if name.startswith('encoder.'):
-            name = name[8:] # remove `encoder.`
-            new_state_dict[name] = v
-    del new_state_dict["embeddings.position_ids"]
+            name = name[8:]
+        new_state_dict[name] = value
+
+    new_state_dict.pop("embeddings.position_ids", None)
     bert.load_state_dict(new_state_dict, strict=False)
-    
+
     return bert
