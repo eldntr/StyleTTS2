@@ -158,14 +158,18 @@ def main(config_path):
     
     with accelerator.main_process_first():
         if config.get('pretrained_model', '') != '':
-            model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
-                                        load_only_params=config.get('load_only_params', True))
+            model, optimizer, start_epoch, iters, state = load_checkpoint(model,  optimizer, config['pretrained_model'],
+                                        load_only_params=config.get('load_only_params', True),
+                                        ignore_modules=config.get('pretrained_ignore_modules', []))
         else:
             start_epoch = 0
             iters = 0
+            state = None
 
     tma_active = False
-    if start_epoch >= TMA_epoch:
+    if state is not None and 'tma_active' in state and not config.get('load_only_params', True):
+        tma_active = state['tma_active']
+    elif start_epoch >= TMA_epoch:
         tma_active = True
     
     # in case not distributed
@@ -436,6 +440,7 @@ def main(config_path):
                     'iters': iters,
                     'val_loss': loss_test / iters_test,
                     'epoch': epoch,
+                    'tma_active': tma_active,
                 }
                 save_path = osp.join(log_dir, 'epoch_1st_%05d.pth' % epoch)
                 torch.save(state, save_path)
@@ -462,6 +467,7 @@ def main(config_path):
             'iters': iters,
             'val_loss': loss_test / iters_test,
             'epoch': epoch,
+            'tma_active': tma_active,
         }
         save_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
         torch.save(state, save_path)

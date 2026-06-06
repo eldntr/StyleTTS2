@@ -154,7 +154,7 @@ def main(config_path):
         if config.get('first_stage_path', '') != '':
             first_stage_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
             print('Loading the first stage model at %s ...' % first_stage_path)
-            model, _, start_epoch, iters = load_checkpoint(model, 
+            model, _, start_epoch, iters, state = load_checkpoint(model, 
                 None, 
                 first_stage_path,
                 load_only_params=True,
@@ -219,9 +219,11 @@ def main(config_path):
             g['weight_decay'] = 1e-4
         
     # load models if there is a model
+    state = None
     if load_pretrained:
-        model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
-                                    load_only_params=config.get('load_only_params', True))
+        model, optimizer, start_epoch, iters, state = load_checkpoint(model,  optimizer, config['pretrained_model'],
+                                    load_only_params=config.get('load_only_params', True),
+                                    ignore_modules=config.get('pretrained_ignore_modules', []))
         
     n_down = model.text_aligner.n_down
 
@@ -244,10 +246,13 @@ def main(config_path):
     
     diff_active = False
     joint_active = False
-    if start_epoch >= diff_epoch:
-        diff_active = True
-    if start_epoch >= joint_epoch:
-        joint_active = True
+    
+    if state is not None and not config.get('load_only_params', True):
+        diff_active = state.get('diff_active', start_epoch >= diff_epoch)
+        joint_active = state.get('joint_active', start_epoch >= joint_epoch)
+    else:
+        diff_active = start_epoch >= diff_epoch
+        joint_active = start_epoch >= joint_epoch
 
     
     slmadv_params = Munch(config['slmadv_params'])
@@ -472,8 +477,9 @@ def main(config_path):
             running_loss += loss_mel.item()
             g_loss.backward()
             if torch.isnan(g_loss):
-                from IPython.core.debugger import set_trace
-                set_trace()
+                print(f"[Peringatan] Terdeteksi NaN pada Epoch {epoch+1}, Step {i+1}. Melompati batch ini...")
+                optimizer.zero_grad()
+                continue
 
             optimizer.step('bert_encoder')
             optimizer.step('bert')
@@ -670,8 +676,9 @@ def main(config_path):
                         for bib in range(_s2s_trg.shape[0]):
                             _s2s_trg[bib, :_text_input[bib]] = 1
                         _dur_pred = torch.sigmoid(_s2s_pred).sum(axis=1)
-                        loss_dur += F.l1_loss(_dur_pred[1:_text_length-1], 
-                                               _text_input[1:_text_length-1])
+                        if _text_length > 2:
+                            loss_dur += F.l1_loss(_dur_pred[1:_text_length-1], 
+                                                   _text_input[1:_text_length-1])
 
                     loss_dur /= texts.size(0)
 
@@ -796,6 +803,8 @@ def main(config_path):
                 'iters': iters,
                 'val_loss': loss_test / iters_test,
                 'epoch': epoch,
+                'diff_active': diff_active,
+                'joint_active': joint_active,
             }
             save_path = osp.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
             torch.save(state, save_path)
