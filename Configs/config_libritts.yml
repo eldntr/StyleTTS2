@@ -111,3 +111,11 @@ slmadv_params:
   thresh: 5 # gradient norm above which the gradient is scaled
   scale: 0.01 # gradient scaling factor for predictors from SLM discriminators
   sig: 1.5 # sigma for differentiable duration modeling
+
+early_stopping_params:
+  patience_tma: 5
+  patience_stage1: 10
+  patience_diff: 5
+  patience_joint: 5
+  patience_stage2: 10
+

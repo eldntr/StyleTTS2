@@ -130,6 +130,14 @@ def main(config_path):
     loss_params = Munch(config['loss_params'])
     TMA_epoch = loss_params.TMA_epoch
     
+    early_stopping_params = Munch(config.get('early_stopping_params', {
+        'patience_tma': 5,
+        'patience_stage1': 10
+    }))
+    from utils import EarlyStopping
+    es_tma = EarlyStopping(patience=early_stopping_params.get('patience_tma', 5))
+    es_stage1 = EarlyStopping(patience=early_stopping_params.get('patience_stage1', 10))
+    
     for k in model:
         model[k] = accelerator.prepare(model[k])
     
@@ -155,8 +163,13 @@ def main(config_path):
         else:
             start_epoch = 0
             iters = 0
+
+    tma_active = False
+    if start_epoch >= TMA_epoch:
+        tma_active = True
     
     # in case not distributed
+
     try:
         n_down = model.text_aligner.module.n_down
     except:
@@ -256,7 +269,7 @@ def main(config_path):
             
             # discriminator loss
             
-            if epoch >= TMA_epoch:
+            if tma_active:
                 optimizer.zero_grad()
                 d_loss = dl(wav.detach().unsqueeze(1).float(), y_rec.detach()).mean()
                 accelerator.backward(d_loss)
@@ -269,7 +282,7 @@ def main(config_path):
             optimizer.zero_grad()
             loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
             
-            if epoch >= TMA_epoch: # start TMA training
+            if tma_active: # start TMA training
                 loss_s2s = 0
                 for _s2s_pred, _text_input, _text_length in zip(s2s_pred, texts, input_lengths):
                     loss_s2s += F.cross_entropy(_s2s_pred[:_text_length], _text_input[:_text_length])
@@ -301,7 +314,7 @@ def main(config_path):
             optimizer.step('style_encoder')
             optimizer.step('decoder')
             
-            if epoch >= TMA_epoch: 
+            if tma_active: 
                 optimizer.step('text_aligner')
                 optimizer.step('pitch_extractor')
             
@@ -426,6 +439,20 @@ def main(config_path):
                 }
                 save_path = osp.join(log_dir, 'epoch_1st_%05d.pth' % epoch)
                 torch.save(state, save_path)
+                                
+        val_mel_loss = loss_test / iters_test
+        if not tma_active:
+            if es_tma.step(val_mel_loss):
+                tma_active = True
+                if accelerator.is_main_process:
+                    log_print("Early stopping triggered: transitioning to TMA training phase.", logger)
+                es_stage1.reset()
+        else:
+            if es_stage1.step(val_mel_loss):
+                if accelerator.is_main_process:
+                    log_print("Early stopping triggered: Stage 1 training completed.", logger)
+                break
+
                                 
     if accelerator.is_main_process:
         print('Saving..')
