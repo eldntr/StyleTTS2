@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # Dapatkan lokasi absolut direktori tempat script ini berada
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+SCRIPT_DIR="$( cd "$( dirname "$0" )" >/dev/null 2>&1 && pwd )"
 cd "$SCRIPT_DIR"
 
 echo "========================================================="
-echo "  StyleTTS2 Dataset Pruner (Filter Durasi 2-7 Detik)"
+echo "  StyleTTS2 Dataset Pruner (Filter Durasi 3-6 Detik)"
 echo "========================================================="
 
 # Cari interpreter Python yang tepat
