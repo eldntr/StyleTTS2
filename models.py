@@ -24,6 +24,75 @@ from Modules.discriminators import MultiPeriodDiscriminator, MultiResSpecDiscrim
 from munch import Munch
 import yaml
 
+class LoRALinear(nn.Module):
+    def __init__(self, original_linear, rank=8, alpha=16):
+        super().__init__()
+        self.original_linear = original_linear
+        # Freeze original linear
+        for p in self.original_linear.parameters():
+            p.requires_grad = False
+        
+        in_features = original_linear.in_features
+        out_features = original_linear.out_features
+        
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        self.scaling = alpha / rank
+        
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+        
+    def forward(self, x):
+        out = self.original_linear(x)
+        lora_out = F.linear(F.linear(x, self.lora_A), self.lora_B) * self.scaling
+        return out + lora_out
+
+    def load_state_dict(self, state_dict, strict=True):
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if not k.startswith("original_linear.") and not k.startswith("lora_"):
+                new_state_dict["original_linear." + k] = v
+            else:
+                new_state_dict[k] = v
+        return super().load_state_dict(new_state_dict, strict=strict)
+
+class PLBERTAdapterWrapper(nn.Module):
+    def __init__(self, plbert, hidden_dim=768, bottleneck_dim=64):
+        super().__init__()
+        self.plbert = plbert
+        self.adapter = nn.Sequential(
+            nn.Linear(hidden_dim, bottleneck_dim),
+            nn.ReLU(),
+            nn.Linear(bottleneck_dim, hidden_dim)
+        )
+        nn.init.zeros_(self.adapter[2].weight)
+        nn.init.zeros_(self.adapter[2].bias)
+        
+    def forward(self, texts, attention_mask=None):
+        x = self.plbert(texts, attention_mask=attention_mask)
+        adapter_out = self.adapter(x)
+        return x + adapter_out
+
+    def load_state_dict(self, state_dict, strict=True):
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if not k.startswith("plbert.") and not k.startswith("adapter."):
+                new_state_dict["plbert." + k] = v
+            else:
+                new_state_dict[k] = v
+        return super().load_state_dict(new_state_dict, strict=strict)
+
+def apply_lora(module, rank=8, alpha=16):
+    for name, child in module.named_children():
+        if isinstance(child, nn.Linear):
+            setattr(module, name, LoRALinear(child, rank, alpha))
+        else:
+            apply_lora(child, rank, alpha)
+
+
+
+
+
 class LearnedDownSample(nn.Module):
     def __init__(self, layer_type, dim_in):
         super().__init__()
@@ -463,6 +532,9 @@ class ProsodyPredictor(nn.Module):
         
         self.F0_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
         self.N_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
+        
+        # Breathy pitch conditioning projection
+        self.breathy_proj = nn.Conv1d(1, d_hid // 2, kernel_size=3, padding=1)
 
 
     def forward(self, texts, style, text_lengths, alignment, m):
@@ -494,10 +566,14 @@ class ProsodyPredictor(nn.Module):
 
         return duration.squeeze(-1), en
     
-    def F0Ntrain(self, x, s):
+    def F0Ntrain(self, x, s, breathy_mask=None):
         x, _ = self.shared(x.transpose(-1, -2))
         
         F0 = x.transpose(-1, -2)
+        if breathy_mask is not None:
+            # Add breathy stops pitch depression bias
+            F0 = F0 + self.breathy_proj(breathy_mask)
+            
         for block in self.F0:
             F0 = block(F0, s)
         F0 = self.F0_proj(F0)
@@ -513,6 +589,7 @@ class ProsodyPredictor(nn.Module):
         mask = torch.arange(lengths.max()).unsqueeze(0).expand(lengths.shape[0], -1).type_as(lengths)
         mask = torch.gt(mask+1, lengths.unsqueeze(1))
         return mask
+
     
 class DurationEncoder(nn.Module):
 
@@ -583,10 +660,17 @@ class DurationEncoder(nn.Module):
     
 def load_F0_models(path):
     # load F0 model
-
     F0_model = JDCNet(num_class=1, seq_len=192)
     params = torch.load(path, map_location='cpu')['net']
-    F0_model.load_state_dict(params)
+    
+    # Strip module. prefix if present from PyTorch DataParallel saving
+    from collections import OrderedDict
+    new_params = OrderedDict()
+    for k, v in params.items():
+        name = k[7:] if k.startswith('module.') else k
+        new_params[name] = v
+        
+    F0_model.load_state_dict(new_params)
     _ = F0_model.train()
     
     return F0_model
@@ -667,8 +751,14 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     )
     diffusion.diffusion.net = transformer
     diffusion.unet = transformer
+    if args.get('use_adapter', False):
+        print("Applying PL-BERT Adapter...")
+        bert = PLBERTAdapterWrapper(bert)
+        
+    # NOTE: apply_lora dipanggil di train_finetune.py SETELAH load_checkpoint,
+    # bukan di sini — agar pretrained weights ter-load dengan key yang benar
+    # sebelum LoRALinear mengganti nn.Linear dan mengubah nama parameter.
 
-    
     nets = Munch(
             bert=bert,
             bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
@@ -692,6 +782,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
        )
     
     return nets
+
 
 def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
     state = torch.load(path, map_location='cpu')

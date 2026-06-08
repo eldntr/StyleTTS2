@@ -47,6 +47,20 @@ handler.setLevel(logging.DEBUG)
 logger.addHandler(handler)
 
 
+def get_breathy_mask_tensor(texts, breathy_token_ids, idx_d, idx_h, device):
+    mask = torch.zeros_like(texts, dtype=torch.float32)
+    for token_id in breathy_token_ids:
+        mask = mask + (texts == token_id).float()
+    
+    if idx_d != -1 and idx_h != -1 and texts.shape[-1] > 1:
+        is_d = (texts == idx_d)
+        is_h = (texts == idx_h)
+        is_dh = is_d[:, :-1] & is_h[:, 1:]
+        is_dh_padded = F.pad(is_dh, (0, 1), value=False)
+        mask = mask + is_dh_padded.float()
+        
+    return mask.unsqueeze(1).to(device)
+
 @click.command()
 @click.option('-p', '--config_path', default='Configs/config_ft.yml', type=str)
 def main(config_path):
@@ -139,6 +153,10 @@ def main(config_path):
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
     _ = [model[key].to(device) for key in model]
     
+    # PEFT mode flags (digunakan setelah checkpoint terload)
+    use_lora = model_params.get('use_lora', False)
+    use_adapter = model_params.get('use_adapter', False)
+
     # DP
     for key in model:
         if key != "mpd" and key != "msd" and key != "wd":
@@ -197,7 +215,17 @@ def main(config_path):
     scheduler_params_dict['decoder']['max_lr'] = optimizer_params.ft_lr * 2
     scheduler_params_dict['style_encoder']['max_lr'] = optimizer_params.ft_lr * 2
     
-    optimizer = build_optimizer({key: model[key].parameters() for key in model},
+    # Filter parameters to only optimize those that require gradients (to support LoRA / Adapter freezing)
+    trainable_params_dict = {}
+    for key in model:
+        params = [p for p in model[key].parameters() if p.requires_grad]
+        if len(params) > 0:
+            trainable_params_dict[key] = params
+        else:
+            # dummy parameter to keep the optimizer key active for multioptimizer
+            trainable_params_dict[key] = [nn.Parameter(torch.zeros(1, requires_grad=True).to(device))]
+
+    optimizer = build_optimizer(trainable_params_dict,
                                           scheduler_params_dict=scheduler_params_dict, lr=optimizer_params.lr)
     
     # adjust BERT learning rate
@@ -219,9 +247,64 @@ def main(config_path):
         
     # load models if there is a model
     if load_pretrained:
-        model, optimizer, start_epoch, iters, _ = load_checkpoint(model,  optimizer, config['pretrained_model'],
+        model, optimizer, start_epoch, iters, _ = load_checkpoint(model, optimizer, config['pretrained_model'],
                                     load_only_params=config.get('load_only_params', True))
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # PEFT Setup: apply LoRA/Adapter SETELAH checkpoint terload
+    # Urutan kritis: load weights dulu (key asli) → baru wrap dengan LoRA
+    # (key berubah: linear_layer.weight → linear_layer.original_linear.weight)
+    # ──────────────────────────────────────────────────────────────────────────
+    if use_lora:
+        print("Applying LoRA to ProsodyPredictor (post-checkpoint)...")
+        from models import apply_lora
+        apply_lora(model.predictor, rank=8)
+        # lora_A / lora_B dibuat sebagai CPU tensor → pindahkan ke GPU
+        model['predictor'].to(device)
+
+    if use_lora or use_adapter:
+        print("PEFT Mode: freezing all base model parameters (termasuk discriminator)...")
+        for key in model:
+            for p in model[key].parameters():
+                p.requires_grad = False
+
+        if use_lora:
+            print("Enabling training for LoRA layers in predictor...")
+            for name, p in model['predictor'].named_parameters():
+                if 'lora_' in name:
+                    p.requires_grad = True
+
+        # Duration head selalu di-unfreeze di semua PEFT mode:
+        # LSTM tidak mendapat LoRA (bukan nn.Linear) → adaptasi durasi Jawa wajib
+        print("Enabling training for duration head (lstm + duration_proj)...")
+        for p in model['predictor'].lstm.parameters():
+            p.requires_grad = True
+        for p in model['predictor'].duration_proj.parameters():
+            p.requires_grad = True
+
+        if use_adapter:
+            print("Enabling training for PL-BERT Adapter layers...")
+            for name, p in model['bert'].named_parameters():
+                if 'adapter.' in name:
+                    p.requires_grad = True
+
+        print("Enabling training for bert_encoder parameters...")
+        for p in model['bert_encoder'].parameters():
+            p.requires_grad = True
+
+        print("Discriminator (mpd/msd/wd) FROZEN — fixed perceptual evaluator.")
+
+        # Log trainable parameter count
+        total = sum(p.numel() for key in model for p in model[key].parameters())
+        trainable = sum(p.numel() for key in model for p in model[key].parameters() if p.requires_grad)
+        print(f"Trainable params: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)")
+
+        use_breathy = model_params.get('use_breathy', False)
+        print(f"Breathy Pitch Conditioning: {'AKTIF' if use_breathy else 'nonaktif'}")
+
         
+    wd_trainable = any(p.requires_grad for p in model.wd.parameters())
+
     n_down = model.text_aligner.n_down
 
     best_loss = float('inf')  # best test loss
@@ -416,7 +499,22 @@ def main(config_path):
 
                 wav = y_rec_gt
 
-            F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s_dur)
+            # Breathy stops pitch conditioning
+            use_breathy = model_params.get('use_breathy', False)
+            breathy_mask_frames = None
+            if use_breathy:
+                # Find token IDs for breathy characters
+                breathy_chars = ['b', 'd', 'g', 'ɖ', 'ɟ']
+                textcleaner = TextCleaner()
+                breathy_token_ids = [textcleaner.word_index_dictionary[char] for char in breathy_chars if char in textcleaner.word_index_dictionary]
+                idx_d = textcleaner.word_index_dictionary.get('d', -1)
+                idx_h = textcleaner.word_index_dictionary.get('h', -1)
+                
+                breathy_mask_phon = get_breathy_mask_tensor(texts, breathy_token_ids, idx_d, idx_h, device)
+                # Map to frame level
+                breathy_mask_frames = (breathy_mask_phon @ s2s_attn_mono)
+                
+            F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s_dur, breathy_mask=breathy_mask_frames)
 
             y_rec = model.decoder(en, F0_fake, N_fake, s)
 
@@ -424,10 +522,16 @@ def main(config_path):
             loss_norm_rec = F.smooth_l1_loss(N_real, N_fake)
 
             optimizer.zero_grad()
-            d_loss = dl(wav.detach(), y_rec.detach()).mean()
-            d_loss.backward()
-            optimizer.step('msd')
-            optimizer.step('mpd')
+            # PEFT mode: disc frozen → skip disc training step
+            # Generator frozen → tidak ada kompetisi GAN yang bermakna
+            if use_lora or use_adapter:
+                d_loss = dl(wav.detach(), y_rec.detach()).mean()
+                # Tidak di-backward, hanya untuk logging
+            else:
+                d_loss = dl(wav.detach(), y_rec.detach()).mean()
+                d_loss.backward()
+                optimizer.step('msd')
+                optimizer.step('mpd')
 
             # generator loss
             optimizer.zero_grad()
@@ -553,7 +657,7 @@ def main(config_path):
                     optimizer.step('diffusion')
 
                     # SLM discriminator loss
-                    if d_loss_slm != 0:
+                    if wd_trainable and torch.is_tensor(d_loss_slm) and d_loss_slm.requires_grad:
                         optimizer.zero_grad()
                         d_loss_slm.backward(retain_graph=True)
                         optimizer.step('wd')
@@ -660,7 +764,19 @@ def main(config_path):
                     gt = torch.stack(gt).detach()
                     s = model.predictor_encoder(gt.unsqueeze(1))
 
-                    F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s)
+                    # Breathy stops pitch conditioning for validation
+                    breathy_mask_frames = None
+                    if use_breathy:
+                        breathy_chars = ['b', 'd', 'g', 'ɖ', 'ɟ']
+                        textcleaner = TextCleaner()
+                        breathy_token_ids = [textcleaner.word_index_dictionary[char] for char in breathy_chars if char in textcleaner.word_index_dictionary]
+                        idx_d = textcleaner.word_index_dictionary.get('d', -1)
+                        idx_h = textcleaner.word_index_dictionary.get('h', -1)
+                        
+                        breathy_mask_phon = get_breathy_mask_tensor(texts, breathy_token_ids, idx_d, idx_h, device)
+                        breathy_mask_frames = (breathy_mask_phon @ s2s_attn_mono)
+                        
+                    F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s, breathy_mask=breathy_mask_frames)
 
                     loss_dur = 0
                     for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), input_lengths):
