@@ -1,0 +1,29 @@
+/workspace/StyleTTS2/.venv/bin/python3 predict.py \
+    --text "kulo badhe nyuwun pangapunten" \
+    --ref_audio /workspace/local/jv/wavs/jvm_09724_01525898676.wav \
+    --config Models/Base_stage2/config.yml \
+    --checkpoint Models/Base_stage2/epoch_2nd_00020.pth \
+    --output hasil_id.wav
+
+/workspace/StyleTTS2/.venv/bin/python3 predict.py \
+    --text "Nyuwun pangapunten, menawi kepareng kula badhe nyuwun pirsa." \
+    --ref_audio /workspace/local/jv/wavs/jvm_09724_01525898676.wav \
+    --config Models/jv30/config_ft.yml \
+    --checkpoint Models/jv30/epoch_2nd_00024.pth \
+    --output hasil_tes_teks.wav
+
+/workspace/StyleTTS2/.venv/bin/python3 predict.py \
+    --text "Nyuwun pangapunten, menawi kepareng kula badhe nyuwun pirsa." \
+    --ref_audio /workspace/local/jv/wavs/jvm_05219_00221510849.wav \
+    --config Models/jv30/config_ft.yml \
+    --checkpoint Models/peft_scenario_E/epoch_2nd_00049.pth \
+    --output hasil_tes_teks.wav
+
+   /workspace/StyleTTS2/.venv/bin/python3 predict.py \
+    --phonemized \
+    --text "kˈulo bˈadhə ɲˈuwun pˌaŋapˈuntən" \
+    --ref_audio /workspace/local/jv/wavs/jvm_09724_01525898676.wav \
+    --config Models/Base_stage2/config.yml \
+    --checkpoint Models/Base_stage2/epoch_2nd_00020.pth \
+    --output hasil_id.wav
+
