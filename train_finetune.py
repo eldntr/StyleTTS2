@@ -153,7 +153,7 @@ def main(config_path):
         if config.get('first_stage_path', '') != '':
             first_stage_path = osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
             print('Loading the first stage model at %s ...' % first_stage_path)
-            model, _, start_epoch, iters = load_checkpoint(model, 
+            model, _, start_epoch, iters, _ = load_checkpoint(model, 
                 None, 
                 first_stage_path,
                 load_only_params=True,
@@ -219,7 +219,7 @@ def main(config_path):
         
     # load models if there is a model
     if load_pretrained:
-        model, optimizer, start_epoch, iters = load_checkpoint(model,  optimizer, config['pretrained_model'],
+        model, optimizer, start_epoch, iters, _ = load_checkpoint(model,  optimizer, config['pretrained_model'],
                                     load_only_params=config.get('load_only_params', True))
         
     n_down = model.text_aligner.n_down

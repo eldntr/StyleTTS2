@@ -167,10 +167,10 @@ def main(config_path):
             state = None
 
     tma_active = False
-    if state is not None and 'tma_active' in state and not config.get('load_only_params', True):
-        tma_active = state['tma_active']
-    elif start_epoch >= TMA_epoch:
+    if start_epoch >= TMA_epoch:
         tma_active = True
+    elif state is not None and 'tma_active' in state and not config.get('load_only_params', True):
+        tma_active = state['tma_active']
     
     # in case not distributed
 

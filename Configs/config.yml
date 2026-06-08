@@ -1,16 +1,16 @@
-log_dir: "Models/LJSpeech"
-first_stage_path: "first_stage.pth"
+log_dir: "Models/Base_stage2"
+first_stage_path: ""
 save_freq: 2
 log_interval: 10
 device: "cuda"
 epochs_1st: 200 # number of epochs for first stage training (pre-training)
 epochs_2nd: 100 # number of peochs for second stage training (joint training)
-batch_size: 2
-max_len: 200 # maximum number of frames
-pretrained_model: "/workspace/local/epoch_2nd_00100.pth"
-second_stage_load_pretrained: false # set to true if the pre-trained model is for 2nd stage
-load_only_params: true # set to true if do not want to load epoch numbers and optimizer parameters
-pretrained_ignore_modules: ['bert', 'text_aligner', 'pitch_extractor'] # Ignore custom modules when loading English pretrained weights
+batch_size: 8
+max_len: 400 # maximum number of frames
+pretrained_model: "/workspace/StyleTTS2/Models/Base_stage2/epoch_2nd_00020.pth"
+second_stage_load_pretrained: true # set to true if the pre-trained model is for 2nd stage
+load_only_params: false # set to true if do not want to load epoch numbers and optimizer parameters
+pretrained_ignore_modules: [] # Ignore custom modules when loading English pretrained weights
 
 F0_path: "Utils/JDC/bst.t7"
 ASR_config: "Utils/ASR/config.yml"
@@ -18,10 +18,10 @@ ASR_path: "Utils/ASR/epoch_00200.pth"
 PLBERT_dir: "Utils/PLBERT/"
 
 data_params:
-  train_data: "../local/id/phonemized_lists/train_list_phon_sub.txt"
-  val_data: "../local/id/phonemized_lists/val_list_phon_sub.txt"
+  train_data: "../local/id/phonemized_lists/train_list_phon.txt"
+  val_data: "../local/id/phonemized_lists/val_list_phon.txt"
   root_path: "../local/id/wavs"
-  OOD_data: "../local/id/phonemized_lists/test_list_phon_sub.txt"
+  OOD_data: "../local/id/phonemized_lists/test_list_phon.txt"
   min_length: 50 # sample until texts with this size are obtained for OOD texts
 
 preprocess_params:
@@ -89,7 +89,7 @@ loss_params:
     
     lambda_mono: 1. # monotonic alignment loss (1st stage, TMA)
     lambda_s2s: 1. # sequence-to-sequence loss (1st stage, TMA)
-    TMA_epoch: 50 # TMA starting epoch (1st stage)
+    TMA_epoch: 40 # TMA starting epoch (1st stage)
 
     lambda_F0: 1. # F0 reconstruction loss (2nd stage)
     lambda_norm: 1. # norm reconstruction loss (2nd stage)
@@ -116,10 +116,10 @@ slmadv_params:
   sig: 1.5 # sigma for differentiable duration modeling
   
 early_stopping_params:
-  patience_tma: 5
-  patience_stage1: 10
-  patience_diff: 5
-  patience_joint: 5
-  patience_stage2: 10
+  patience_tma: 2
+  patience_stage1: 3
+  patience_diff: 2
+  patience_joint: 2
+  patience_stage2: 3
 
   
