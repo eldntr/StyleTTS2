@@ -623,6 +623,17 @@ def main(config_path):
                 writer.add_scalar('train/norm_loss', loss_norm_rec, iters)
                 writer.add_scalar('train/F0_loss', loss_F0_rec, iters)
                 writer.add_scalar('train/sty_loss', loss_sty, iters)
+                
+                # Log Gate Values
+                if getattr(model_params, 'use_lpep', False) and hasattr(model.text_encoder, 'last_gate_val'):
+                    writer.add_scalar('gate/LPEP_activation', model.text_encoder.last_gate_val, iters)
+                elif getattr(model_params, 'use_lpep', False) and hasattr(model.text_encoder.module, 'last_gate_val'):
+                    writer.add_scalar('gate/LPEP_activation', model.text_encoder.module.last_gate_val, iters)
+                    
+                if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
+                    ppim_mod = model.ppim.module if hasattr(model.ppim, 'module') else model.ppim
+                    if hasattr(ppim_mod, 'last_gate_val'):
+                        writer.add_scalar('gate/PPIM_activation', ppim_mod.last_gate_val, iters)
                 writer.add_scalar('train/diff_loss', loss_diff, iters)
                 writer.add_scalar('train/d_loss_slm', d_loss_slm, iters)
                 writer.add_scalar('train/gen_loss_slm', loss_gen_lm, iters)

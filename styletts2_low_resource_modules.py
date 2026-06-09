@@ -58,6 +58,7 @@ class LPEP(nn.Module):
         z = torch.cat([phone, lang], dim=-1) # Konkatenasi eksplisit
         delta = self.proj(z)
         gate = self.gate(z)
+        self.last_gate_val = gate.mean().item()
         
         # Jalur residual terkontrol
         return self.out_norm(phone + gate * delta)
@@ -106,6 +107,7 @@ class PPIM(nn.Module):
         )
 
         gate = self.gate(torch.cat([h, attn_out], dim=-1))
+        self.last_gate_val = gate.mean().item()
         h = self.norm1(h + self.dropout(gate * attn_out))
         h = self.norm2(h + self.dropout(self.ffn(h)))
 
