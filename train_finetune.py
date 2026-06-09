@@ -25,6 +25,8 @@ from models import *
 from losses import *
 from utils import *
 
+from styletts2_low_resource_modules import configure_peft_stage
+
 from Modules.slmadv import SLMAdversarialLoss
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
 
@@ -222,6 +224,34 @@ def main(config_path):
         model, optimizer, start_epoch, iters, _ = load_checkpoint(model,  optimizer, config['pretrained_model'],
                                     load_only_params=config.get('load_only_params', True))
         
+    # LPEP weight cloning & gate initialization
+    if getattr(model_params, 'use_lpep', False):
+        checkpoint_path = config.get('pretrained_model', '') if load_pretrained else (osp.join(log_dir, config.get('first_stage_path', 'first_stage.pth')) if config.get('first_stage_path', '') != '' else '')
+        if checkpoint_path and osp.exists(checkpoint_path):
+            checkpoint_state = torch.load(checkpoint_path, map_location='cpu')
+            if 'net' in checkpoint_state:
+                net_params = checkpoint_state['net']
+                emb_weight = None
+                for k, v in net_params.items():
+                    if 'text_encoder' in k and 'embedding.weight' in k:
+                        emb_weight = v
+                        break
+                if emb_weight is not None:
+                    te = model.text_encoder.module if hasattr(model.text_encoder, 'module') else model.text_encoder
+                    te.embedding.phone_emb.weight.data.copy_(emb_weight)
+                    print(f"[LPEP] Copied pretrained phoneme embedding of shape {emb_weight.shape} to LPEP.")
+                    for layer in te.embedding.gate:
+                        if isinstance(layer, nn.Linear):
+                            nn.init.constant_(layer.weight, 0.0)
+                            nn.init.constant_(layer.bias, -4.0)
+                    print("[LPEP] Gate initialization set to -4.0 (Identity function condition).")
+
+    peft_stage = config.get('peft_stage', 0)
+    if peft_stage in [1, 2]:
+        configure_peft_stage(model, stage=peft_stage)
+
+    lang_id = config.get('lang_id', 1 if peft_stage > 0 else None)
+        
     n_down = model.text_aligner.n_down
 
     best_loss = float('inf')  # best test loss
@@ -266,13 +296,20 @@ def main(config_path):
         _ = [model[key].eval() for key in model]
         
         model.text_aligner.train()
-        model.text_encoder.train()
+        
+        if peft_stage == 2:
+            model.text_encoder.eval()
+            if hasattr(model, 'ppim'):
+                model.ppim.train()
+        else:
+            model.text_encoder.train()
         
         model.predictor.train()
         model.bert_encoder.train()
         model.bert.train()
-        model.msd.train()
-        model.mpd.train()
+        if peft_stage != 2:
+            model.msd.train()
+            model.mpd.train()
 
         for i, batch in enumerate(train_dataloader):
             waves = batch[0]
@@ -301,13 +338,10 @@ def main(config_path):
             s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
 
             # encode
-            t_en = model.text_encoder(texts, input_lengths, text_mask)
-            
-            # 50% of chance of using monotonic version
-            if bool(random.getrandbits(1)):
-                asr = (t_en @ s2s_attn)
+            if getattr(model_params, 'use_lpep', False):
+                t_en = model.text_encoder(texts, input_lengths, text_mask, lang_id=lang_id)
             else:
-                asr = (t_en @ s2s_attn_mono)
+                t_en = model.text_encoder(texts, input_lengths, text_mask)
 
             d_gt = s2s_attn_mono.sum(axis=-1).detach()
 
@@ -326,6 +360,15 @@ def main(config_path):
             s_dur = torch.stack(ss).squeeze()  # global prosodic styles
             gs = torch.stack(gs).squeeze() # global acoustic styles
             s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
+
+            if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
+                t_en = model.ppim(t_en, s_dur, text_mask)
+
+            # 50% of chance of using monotonic version
+            if bool(random.getrandbits(1)):
+                asr = (t_en @ s2s_attn)
+            else:
+                asr = (t_en @ s2s_attn_mono)
 
             bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
@@ -423,18 +466,25 @@ def main(config_path):
             loss_F0_rec =  (F.smooth_l1_loss(F0_real, F0_fake)) / 10
             loss_norm_rec = F.smooth_l1_loss(N_real, N_fake)
 
-            optimizer.zero_grad()
-            d_loss = dl(wav.detach(), y_rec.detach()).mean()
-            d_loss.backward()
-            optimizer.step('msd')
-            optimizer.step('mpd')
+            if peft_stage != 2:
+                optimizer.zero_grad()
+                d_loss = dl(wav.detach(), y_rec.detach()).mean()
+                d_loss.backward()
+                optimizer.step('msd')
+                optimizer.step('mpd')
+            else:
+                d_loss = torch.tensor(0.0, device=device)
 
             # generator loss
             optimizer.zero_grad()
 
             loss_mel = stft_loss(y_rec, wav)
-            loss_gen_all = gl(wav, y_rec).mean()
-            loss_lm = wl(wav.detach().squeeze(), y_rec.squeeze()).mean()
+            if peft_stage != 2:
+                loss_gen_all = gl(wav, y_rec).mean()
+                loss_lm = wl(wav.detach().squeeze(), y_rec.squeeze()).mean()
+            else:
+                loss_gen_all = torch.tensor(0.0, device=device)
+                loss_lm = torch.tensor(0.0, device=device)
 
             loss_ce = 0
             loss_dur = 0
@@ -492,7 +542,7 @@ def main(config_path):
                 optimizer.step('diffusion')
 
             d_loss_slm, loss_gen_lm = 0, 0
-            if joint_active:
+            if joint_active and peft_stage != 2:
                 # randomly pick whether to use in-distribution text
                 if np.random.rand() < 0.5:
                     use_ind = True
@@ -608,9 +658,11 @@ def main(config_path):
                         s2s_attn_mono = maximum_path(s2s_attn, mask_ST)
 
                         # encode
-                        t_en = model.text_encoder(texts, input_lengths, text_mask)
-                        asr = (t_en @ s2s_attn_mono)
-
+                        if getattr(model_params, 'use_lpep', False):
+                            t_en = model.text_encoder(texts, input_lengths, text_mask, lang_id=lang_id)
+                        else:
+                            t_en = model.text_encoder(texts, input_lengths, text_mask)
+                        
                         d_gt = s2s_attn_mono.sum(axis=-1).detach()
 
                     ss = []
@@ -626,7 +678,12 @@ def main(config_path):
 
                     s = torch.stack(ss).squeeze()
                     gs = torch.stack(gs).squeeze()
-                    s_trg = torch.cat([s, gs], dim=-1).detach()
+                    s_trg = torch.cat([gs, s], dim=-1).detach()
+
+                    if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
+                        t_en = model.ppim(t_en, s, text_mask)
+
+                    asr = (t_en @ s2s_attn_mono)
 
                     bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
                     d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
@@ -688,8 +745,62 @@ def main(config_path):
                     loss_align += (loss_dur).mean()
                     loss_f += (loss_F0).mean()
 
+                    if iters_test == 0:
+                        for bib in range(min(5, wav.shape[0])):
+                            writer.add_audio('eval/y_rec_' + str(bib), y_rec[bib].cpu().numpy().squeeze(), epoch, sample_rate=24000)
+                            writer.add_audio('gt/y_wav_' + str(bib), wav[bib].cpu().numpy().squeeze(), epoch, sample_rate=24000)
+                        
+                        with torch.no_grad():
+                            for bib in range(min(5, len(d_en))):
+                                try:
+                                    if getattr(model_params, 'multispeaker', True):
+                                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(device), 
+                                              embedding=bert_dur[bib].unsqueeze(0),
+                                              embedding_scale=1,
+                                                features=s_trg[bib].unsqueeze(0), 
+                                                 num_steps=5).squeeze(1)
+                                    else:
+                                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(device), 
+                                              embedding=bert_dur[bib].unsqueeze(0),
+                                              embedding_scale=1,
+                                                 num_steps=5).squeeze(1)
+
+                                    # Note: s_trg was [predictor_enc, style_enc] in train_finetune.py
+                                    # Therefore s_pred is also [predictor_enc_pred, style_enc_pred]
+                                    s_pred_sty = s_pred[:, 128:]
+                                    ref_sty = s_pred[:, :128]
+
+                                    d_pred = model.predictor.text_encoder(d_en[bib, :, :input_lengths[bib]].unsqueeze(0), 
+                                                                     s_pred_sty, input_lengths[bib, ...].unsqueeze(0), text_mask[bib, :input_lengths[bib]].unsqueeze(0))
+
+                                    x_pred, _ = model.predictor.lstm(d_pred)
+                                    duration_pred = model.predictor.duration_proj(x_pred)
+                                    duration_pred = torch.sigmoid(duration_pred).sum(axis=-1)
+                                    pred_dur = torch.round(duration_pred.squeeze()).clamp(min=1)
+                                    
+                                    # make sure last phoneme has some duration
+                                    if len(pred_dur.shape) > 0:
+                                        pred_dur[-1] += 5
+
+                                    pred_aln_trg = torch.zeros(input_lengths[bib], int(pred_dur.sum().data))
+                                    c_frame = 0
+                                    for i in range(pred_aln_trg.size(0)):
+                                        pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
+                                        c_frame += int(pred_dur[i].data)
+
+                                    en_pred = (d_pred.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(device))
+                                    F0_pred, N_pred = model.predictor.F0Ntrain(en_pred, s_pred_sty)
+                                    out = model.decoder((t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(device)), 
+                                                            F0_pred, N_pred, ref_sty.squeeze().unsqueeze(0))
+
+                                    writer.add_audio('pred/y_pred_' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=24000)
+                                except Exception as e:
+                                    print(f"Pred generation error: {e}")
+                                    continue
+
                     iters_test += 1
-                except:
+                except Exception as e:
+                    print(f"Validation error: {e}")
                     continue
 
         print('Epochs:', epoch + 1)

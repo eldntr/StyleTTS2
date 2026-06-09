@@ -33,6 +33,7 @@ def main():
     parser.add_argument('--alpha', type=float, default=0.3, help='Timbre preservation factor (0 to 1)')
     parser.add_argument('--beta', type=float, default=0.7, help='Prosody preservation factor (0 to 1)')
     parser.add_argument('--steps', type=int, default=5, help='Diffusion steps')
+    parser.add_argument('--lang_id', type=int, default=None, help='Language ID (0 for Indo, 1 for Javanese)')
     args = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -135,7 +136,11 @@ def main():
         input_lengths = torch.LongTensor([tokens.shape[-1]]).to(device)
         text_mask = length_to_mask(input_lengths).to(device)
 
-        t_en = model.text_encoder(tokens, input_lengths, text_mask)
+        if getattr(model_params, 'use_lpep', False):
+            lang_id_val = args.lang_id if args.lang_id is not None else config.get('lang_id', 1)
+            t_en = model.text_encoder(tokens, input_lengths, text_mask, lang_id=lang_id_val)
+        else:
+            t_en = model.text_encoder(tokens, input_lengths, text_mask)
         bert_dur = model.bert(tokens, attention_mask=(~text_mask).int())
         d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
 
@@ -150,6 +155,9 @@ def main():
 
         ref = args.alpha * ref + (1 - args.alpha)  * ref_s[:, :128]
         s = args.beta * s + (1 - args.beta)  * ref_s[:, 128:]
+
+        if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
+            t_en = model.ppim(t_en, s, text_mask)
 
         d = model.predictor.text_encoder(d_en, s, input_lengths, text_mask)
 
@@ -172,6 +180,9 @@ def main():
             en = asr_new
 
         F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
+
+        if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
+            t_en = model.ppim(t_en, s, text_mask)
 
         asr = (t_en @ pred_aln_trg.unsqueeze(0).to(device))
         if model_params.decoder.type == "hifigan":

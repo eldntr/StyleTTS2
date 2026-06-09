@@ -24,6 +24,8 @@ from Modules.discriminators import MultiPeriodDiscriminator, MultiResSpecDiscrim
 from munch import Munch
 import yaml
 
+from styletts2_low_resource_modules import LPEP, PPIM
+
 class LearnedDownSample(nn.Module):
     def __init__(self, layer_type, dim_in):
         super().__init__()
@@ -299,8 +301,11 @@ class TextEncoder(nn.Module):
 
         self.lstm = nn.LSTM(channels, channels//2, 1, batch_first=True, bidirectional=True)
 
-    def forward(self, x, input_lengths, m):
-        x = self.embedding(x)  # [B, T, emb]
+    def forward(self, x, input_lengths, m, lang_id=None):
+        if isinstance(self.embedding, LPEP):
+            x = self.embedding(x, lang_id)
+        else:
+            x = self.embedding(x)  # [B, T, emb]
         x = x.transpose(1, 2)  # [B, emb, T]
         m = m.to(input_lengths.device).unsqueeze(1)
         x.masked_fill_(m, 0.0)
@@ -330,8 +335,11 @@ class TextEncoder(nn.Module):
         
         return x
 
-    def inference(self, x):
-        x = self.embedding(x)
+    def inference(self, x, lang_id=None):
+        if isinstance(self.embedding, LPEP):
+            x = self.embedding(x, lang_id)
+        else:
+            x = self.embedding(x)
         x = x.transpose(1, 2)
         x = self.cnn(x)
         x = x.transpose(1, 2)
@@ -633,6 +641,10 @@ def build_model(args, text_aligner, pitch_extractor, bert):
                 upsample_kernel_sizes=args.decoder.upsample_kernel_sizes) 
         
     text_encoder = TextEncoder(channels=args.hidden_dim, kernel_size=5, depth=args.n_layer, n_symbols=args.n_token)
+    if getattr(args, 'use_lpep', False):
+        n_langs = getattr(args, 'n_langs', 2)
+        lang_emb_dim = getattr(args, 'lang_emb_dim', 16)
+        text_encoder.embedding = LPEP(args.n_token, args.hidden_dim, n_langs=n_langs, lang_emb_dim=lang_emb_dim)
     
     predictor = ProsodyPredictor(style_dim=args.style_dim, d_hid=args.hidden_dim, nlayers=args.n_layer, max_dur=args.max_dur, dropout=args.dropout)
     
@@ -668,7 +680,11 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     diffusion.diffusion.net = transformer
     diffusion.unet = transformer
 
-    
+    if getattr(args, 'use_ppim', False):
+        ppim = PPIM(hidden_dim=args.hidden_dim, style_dim=args.style_dim)
+    else:
+        ppim = None
+
     nets = Munch(
             bert=bert,
             bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
@@ -690,6 +706,9 @@ def build_model(args, text_aligner, pitch_extractor, bert):
             # slm discriminator head
             wd = WavLMDiscriminator(args.slm.hidden, args.slm.nlayers, args.slm.initial_channel),
        )
+    
+    if ppim is not None:
+        nets.ppim = ppim
     
     return nets
 
