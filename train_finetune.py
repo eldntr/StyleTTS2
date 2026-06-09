@@ -625,18 +625,26 @@ def main(config_path):
                 gate_str = ""
                 # Get Gate Values
                 lpep_val = None
+                lpep_max = None
+                lpep_norm = None
                 if getattr(model_params, 'use_lpep', False):
                     te_mod = model.text_encoder.module if hasattr(model.text_encoder, 'module') else model.text_encoder
                     if hasattr(te_mod, 'embedding') and hasattr(te_mod.embedding.__class__, 'last_gate_val'):
                         lpep_val = te_mod.embedding.__class__.last_gate_val
-                        gate_str += f", LPEP Gate: {lpep_val:.4f}"
+                        lpep_max = getattr(te_mod.embedding.__class__, 'max_gate_val', 0.0)
+                        lpep_norm = getattr(te_mod.embedding.__class__, 'last_adaptation_norm', 0.0)
+                        gate_str += f", LPEP Gate (Mean/Max): {lpep_val:.4f}/{lpep_max:.4f}, LPEP Norm: {lpep_norm:.4f}"
                         
                 ppim_val = None
+                ppim_max = None
+                ppim_norm = None
                 if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
                     ppim_mod = model.ppim.module if hasattr(model.ppim, 'module') else model.ppim
                     if hasattr(ppim_mod.__class__, 'last_gate_val'):
                         ppim_val = ppim_mod.__class__.last_gate_val
-                        gate_str += f", PPIM Gate: {ppim_val:.4f}"
+                        ppim_max = getattr(ppim_mod.__class__, 'max_gate_val', 0.0)
+                        ppim_norm = getattr(ppim_mod.__class__, 'last_adaptation_norm', 0.0)
+                        gate_str += f", PPIM Gate (Mean/Max): {ppim_val:.4f}/{ppim_max:.4f}, PPIM Norm: {ppim_norm:.4f}"
 
                 logger.info ('Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f, SLoss: %.5f, S2S Loss: %.5f, Mono Loss: %.5f%s'
                     %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, d_loss, loss_dur, loss_ce, loss_norm_rec, loss_F0_rec, loss_lm, loss_gen_all, loss_sty, loss_diff, d_loss_slm, loss_gen_lm, s_loss, loss_s2s, loss_mono, gate_str))
@@ -653,9 +661,13 @@ def main(config_path):
                 
                 # Log Gate Values
                 if lpep_val is not None:
-                    writer.add_scalar('gate/LPEP_activation', lpep_val, iters)
+                    writer.add_scalar('gate/LPEP_activation_mean', lpep_val, iters)
+                    writer.add_scalar('gate/LPEP_activation_max', lpep_max, iters)
+                    writer.add_scalar('gate/LPEP_adaptation_norm', lpep_norm, iters)
                 if ppim_val is not None:
-                    writer.add_scalar('gate/PPIM_activation', ppim_val, iters)
+                    writer.add_scalar('gate/PPIM_activation_mean', ppim_val, iters)
+                    writer.add_scalar('gate/PPIM_activation_max', ppim_max, iters)
+                    writer.add_scalar('gate/PPIM_adaptation_norm', ppim_norm, iters)
                     
                 writer.add_scalar('train/diff_loss', loss_diff, iters)
                 writer.add_scalar('train/d_loss_slm', d_loss_slm, iters)

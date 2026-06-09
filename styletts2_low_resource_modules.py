@@ -59,9 +59,13 @@ class LPEP(nn.Module):
         delta = self.proj(z)
         gate = self.gate(z)
         LPEP.last_gate_val = gate.mean().item()
+        LPEP.max_gate_val = gate.max().item()
+        
+        shift = gate * delta
+        LPEP.last_adaptation_norm = shift.norm(dim=-1).mean().item()
         
         # Jalur residual terkontrol
-        return self.out_norm(phone + gate * delta)
+        return self.out_norm(phone + shift)
 
 
 class PPIM(nn.Module):
@@ -114,7 +118,12 @@ class PPIM(nn.Module):
 
         gate = self.gate(torch.cat([h, attn_out], dim=-1))
         PPIM.last_gate_val = gate.mean().item()
-        h = self.norm1(h + self.dropout(gate * attn_out))
+        PPIM.max_gate_val = gate.max().item()
+        
+        shift = gate * attn_out
+        PPIM.last_adaptation_norm = shift.norm(dim=-1).mean().item()
+        
+        h = self.norm1(h + self.dropout(shift))
         h = self.norm2(h + self.dropout(self.ffn(h)))
 
         if mask is not None:
