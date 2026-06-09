@@ -881,20 +881,13 @@ def main(config_path):
         val_mel_loss = loss_test / iters_test
         val_dur_loss = loss_align / iters_test
 
-        if not diff_active:
-            if es_diff.step(val_dur_loss):
-                diff_active = True
-                print("Early stopping triggered: transitioning to Diffusion training phase.")
-                es_joint.reset()
-        elif not joint_active:
-            if es_joint.step(val_mel_loss):
-                joint_active = True
-                print("Early stopping triggered: transitioning to Joint training phase.")
-                es_stage2.reset()
-        else:
-            if es_stage2.step(val_mel_loss):
-                print("Early stopping triggered: Stage 2 training completed.")
-                break
+        if not diff_active and epoch >= loss_params.diff_epoch:
+            diff_active = True
+            print(f"Epoch {epoch} reached: transitioning to Diffusion training phase.")
+        
+        if not joint_active and epoch >= loss_params.joint_epoch:
+            joint_active = True
+            print(f"Epoch {epoch} reached: transitioning to Joint training phase.")
 
 
                             

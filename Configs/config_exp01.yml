@@ -11,11 +11,11 @@ data_params:
   val_data: ../local/jv/phonemized_lists/val_list_phon.txt
 device: cuda
 early_stopping_params:
-  patience_diff: 2
-  patience_joint: 2
-  patience_stage1: 3
-  patience_stage2: 3
-  patience_tma: 2
+  patience_diff: 100
+  patience_joint: 100
+  patience_stage1: 100
+  patience_stage2: 100
+  patience_tma: 100
 epochs: 50
 lang_id: 1
 load_only_params: true
