@@ -616,15 +616,15 @@ def main(config_path):
                 lpep_val = None
                 if getattr(model_params, 'use_lpep', False):
                     te_mod = model.text_encoder.module if hasattr(model.text_encoder, 'module') else model.text_encoder
-                    if hasattr(te_mod, 'embedding') and hasattr(te_mod.embedding, 'last_gate_val'):
-                        lpep_val = te_mod.embedding.last_gate_val
+                    if hasattr(te_mod, 'embedding') and hasattr(te_mod.embedding.__class__, 'last_gate_val'):
+                        lpep_val = te_mod.embedding.__class__.last_gate_val
                         gate_str += f", LPEP Gate: {lpep_val:.4f}"
                         
                 ppim_val = None
                 if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
                     ppim_mod = model.ppim.module if hasattr(model.ppim, 'module') else model.ppim
-                    if hasattr(ppim_mod, 'last_gate_val'):
-                        ppim_val = ppim_mod.last_gate_val
+                    if hasattr(ppim_mod.__class__, 'last_gate_val'):
+                        ppim_val = ppim_mod.__class__.last_gate_val
                         gate_str += f", PPIM Gate: {ppim_val:.4f}"
 
                 logger.info ('Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f, SLoss: %.5f, S2S Loss: %.5f, Mono Loss: %.5f%s'
