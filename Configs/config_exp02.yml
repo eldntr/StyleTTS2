@@ -18,7 +18,7 @@ early_stopping_params:
   patience_tma: 2
 epochs: 50
 lang_id: 1
-load_only_params: false
+load_only_params: true
 log_dir: Models_New/exp02
 log_interval: 10
 loss_params:

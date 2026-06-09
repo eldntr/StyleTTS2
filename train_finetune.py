@@ -611,8 +611,24 @@ def main(config_path):
             iters = iters + 1
             
             if (i+1)%log_interval == 0:
-                logger.info ('Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f, SLoss: %.5f, S2S Loss: %.5f, Mono Loss: %.5f'
-                    %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, d_loss, loss_dur, loss_ce, loss_norm_rec, loss_F0_rec, loss_lm, loss_gen_all, loss_sty, loss_diff, d_loss_slm, loss_gen_lm, s_loss, loss_s2s, loss_mono))
+                gate_str = ""
+                # Get Gate Values
+                lpep_val = None
+                if getattr(model_params, 'use_lpep', False):
+                    te_mod = model.text_encoder.module if hasattr(model.text_encoder, 'module') else model.text_encoder
+                    if hasattr(te_mod, 'embedding') and hasattr(te_mod.embedding, 'last_gate_val'):
+                        lpep_val = te_mod.embedding.last_gate_val
+                        gate_str += f", LPEP Gate: {lpep_val:.4f}"
+                        
+                ppim_val = None
+                if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
+                    ppim_mod = model.ppim.module if hasattr(model.ppim, 'module') else model.ppim
+                    if hasattr(ppim_mod, 'last_gate_val'):
+                        ppim_val = ppim_mod.last_gate_val
+                        gate_str += f", PPIM Gate: {ppim_val:.4f}"
+
+                logger.info ('Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f, SLoss: %.5f, S2S Loss: %.5f, Mono Loss: %.5f%s'
+                    %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, d_loss, loss_dur, loss_ce, loss_norm_rec, loss_F0_rec, loss_lm, loss_gen_all, loss_sty, loss_diff, d_loss_slm, loss_gen_lm, s_loss, loss_s2s, loss_mono, gate_str))
                 
                 writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
                 writer.add_scalar('train/gen_loss', loss_gen_all, iters)
@@ -625,15 +641,11 @@ def main(config_path):
                 writer.add_scalar('train/sty_loss', loss_sty, iters)
                 
                 # Log Gate Values
-                if getattr(model_params, 'use_lpep', False) and hasattr(model.text_encoder, 'last_gate_val'):
-                    writer.add_scalar('gate/LPEP_activation', model.text_encoder.last_gate_val, iters)
-                elif getattr(model_params, 'use_lpep', False) and hasattr(model.text_encoder.module, 'last_gate_val'):
-                    writer.add_scalar('gate/LPEP_activation', model.text_encoder.module.last_gate_val, iters)
+                if lpep_val is not None:
+                    writer.add_scalar('gate/LPEP_activation', lpep_val, iters)
+                if ppim_val is not None:
+                    writer.add_scalar('gate/PPIM_activation', ppim_val, iters)
                     
-                if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
-                    ppim_mod = model.ppim.module if hasattr(model.ppim, 'module') else model.ppim
-                    if hasattr(ppim_mod, 'last_gate_val'):
-                        writer.add_scalar('gate/PPIM_activation', ppim_mod.last_gate_val, iters)
                 writer.add_scalar('train/diff_loss', loss_diff, iters)
                 writer.add_scalar('train/d_loss_slm', d_loss_slm, iters)
                 writer.add_scalar('train/gen_loss_slm', loss_gen_lm, iters)
