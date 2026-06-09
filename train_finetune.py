@@ -232,13 +232,21 @@ def main(config_path):
             if 'net' in checkpoint_state:
                 net_params = checkpoint_state['net']
                 emb_weight = None
-                for k, v in net_params.items():
-                    if 'text_encoder' in k and 'embedding.weight' in k:
-                        emb_weight = v
-                        break
+                
+                # The checkpoint stores state_dicts under module keys
+                if 'text_encoder' in net_params:
+                    te_state = net_params['text_encoder']
+                    if 'embedding.weight' in te_state:
+                        emb_weight = te_state['embedding.weight']
+                    elif 'module.embedding.weight' in te_state:
+                        emb_weight = te_state['module.embedding.weight']
+                        
                 if emb_weight is not None:
                     te = model.text_encoder.module if hasattr(model.text_encoder, 'module') else model.text_encoder
-                    te.embedding.phone_emb.weight.data.copy_(emb_weight)
+                    # Handle shape differences if LPEP has different number of symbols or channels
+                    min_symbols = min(te.embedding.phone_emb.weight.data.size(0), emb_weight.size(0))
+                    min_channels = min(te.embedding.phone_emb.weight.data.size(1), emb_weight.size(1))
+                    te.embedding.phone_emb.weight.data[:min_symbols, :min_channels].copy_(emb_weight[:min_symbols, :min_channels])
                     print(f"[LPEP] Copied pretrained phoneme embedding of shape {emb_weight.shape} to LPEP.")
                     for layer in te.embedding.gate:
                         if isinstance(layer, nn.Linear):
@@ -537,6 +545,9 @@ def main(config_path):
             
             optimizer.step('text_encoder')
             optimizer.step('text_aligner')
+            
+            if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
+                optimizer.step('ppim')
             
             if diff_active:
                 optimizer.step('diffusion')

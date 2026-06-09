@@ -82,6 +82,12 @@ class PPIM(nn.Module):
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.Sigmoid(),
         )
+        
+        # Zero-Gate Initialization untuk PPIM
+        for layer in self.gate:
+            if isinstance(layer, nn.Linear):
+                nn.init.constant_(layer.weight, 0.0)
+                nn.init.constant_(layer.bias, -4.0)
         self.ffn = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 4),
             nn.LeakyReLU(0.2),
