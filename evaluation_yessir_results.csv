@@ -1,0 +1,6 @@
+File,GT_Text,Pred_Text,MCD,F0_RMSE_Log,VDE,GPE,Dur_Diff_s,WER,CER,PER,HuBERT_Sim,SEC
+kalimat_1.wav,ojok lali gawa jaket nèk arep metu metu saiki wis musim bedhidhing soale, ojo lalik gawa jaket neerap mentomento saya kiwis musim berdiking soalnya,7.056,0.146,0.286,0.012,0.516,0.769,0.319,0.276,0.99,0.296
+kalimat_2.wav,mitsubishi manggoni gedhung sentral senayan siji lan loro, mitsubishi manggoni kedung sentral senayan sici lanlorung,7.103,0.147,0.099,0.055,0.564,0.5,0.123,0.167,0.989,0.316
+kalimat_3.wav,jake gyllenhaal ngantosi sedherekipun dugi saking kutha malang, jake kelinaan ngantasi sederikipun dugi saking kutama langsung,6.28,0.371,0.088,0.347,1.774,0.625,0.258,0.36,0.98,0.785
+kalimat_4.wav,sir alex ferguson mek isok tenger tenger ndelok kelakuane bojone, sir alex ferguson meisok tengertenger di lokalkuannya pucuni,7.113,0.184,0.171,0.138,0.147,0.7,0.281,0.191,0.991,0.386
+kalimat_5.wav,perkara kaping telu disaranake adus banyu anget, perkara kapping telur di sarana e adus banyu anget,6.907,0.232,0.138,0.217,1.289,0.714,0.085,0.25,0.943,0.258

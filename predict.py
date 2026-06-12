@@ -181,9 +181,6 @@ def main():
 
         F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
 
-        if getattr(model_params, 'use_ppim', False) and hasattr(model, 'ppim'):
-            t_en = model.ppim(t_en, s, text_mask)
-
         asr = (t_en @ pred_aln_trg.unsqueeze(0).to(device))
         if model_params.decoder.type == "hifigan":
             asr_new = torch.zeros_like(asr)
